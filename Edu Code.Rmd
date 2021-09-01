@@ -1,0 +1,408 @@
+---
+title: "0012 Code"
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+# Load packages
+```{r}
+library(tmap)
+library(sf)
+library(spdep)
+library(ggplot2)
+library(deldir)
+library(sp)
+library(purrr)
+library(here)
+library(tidyverse)
+library(janitor)
+```
+
+
+
+# Load data
+```{r}
+clev.points <- st_read(here::here("regression2.5.json"))%>%
+  st_transform(.,27700)
+
+a <- read.csv("regression2.5.csv")
+```
+
+```{r}
+vehicle.points = st_as_sf(a, coords = c("lon", "lat"), crs = 4326, agr = "constant")
+class(vehicle.points)
+
+```
+```{r}
+plot(clev.points)
+```
+
+
+# Visualisation data
+
+```{r}
+LondonBoroughs <- st_read(here::here("shenzhen",
+                                     "Shenzhen.shp"))%>%
+  st_transform(.,27700)
+qtm(LondonBoroughs) 
+
+tmap_mode("view")
+tm_shape(LondonBoroughs) +
+  tm_polygons(col = NA, alpha = 0.5) +
+  tm_shape(vehicle.points) +
+  tm_dots(col = "blue")
+```
+
+# Spatial weight matrix
+## Voronoi diagram
+```{r}
+
+vtess <- deldir(a$lon, a$lat)
+plot(vtess, wlines="tess", wpoints="none",
+     lty=1)
+
+voronoipolygons = function(thiess) {
+  w = tile.list(thiess)
+  polys = vector(mode='list', length=length(w))
+  for (i in seq(along=polys)) {
+    pcrds = cbind(w[[i]]$x, w[[i]]$y)
+    pcrds = rbind(pcrds, pcrds[1,])
+    polys[[i]] = Polygons(list(Polygon(pcrds)), ID=as.character(i))
+  }
+  SP = SpatialPolygons(polys)
+  voronoi = SpatialPolygonsDataFrame(SP, data=data.frame(dummy = seq(length(SP)), row.names=sapply(slot(SP, 'polygons'), 
+                                                                                                   function(x) slot(x, 'ID'))))
+}
+
+v <- voronoipolygons(vtess)
+plot(v)
+
+vtess.sf <- st_as_sf(v)
+plot(vtess.sf$geometry)
+```
+
+
+
+## Saptial weight matrix (queen)
+```{r}
+
+st_queen <- function(a, b = a) st_relate(a, b, pattern = "F***T****")
+
+queen.sgbp <- st_queen(vtess.sf)
+
+as.nb.sgbp <- function(x, ...) {
+  attrs <- attributes(x)
+  x <- lapply(x, function(i) { if(length(i) == 0L) 0L else i } )
+  attributes(x) <- attrs
+  class(x) <- "nb"
+  x
+}
+
+queen.nb <- as.nb.sgbp(queen.sgbp)
+queen.weights <- nb2listw(queen.nb)
+queen.weights
+```
+
+## queen.nb
+```{r}
+queen.nb.card <- card(queen.nb)
+ggplot() +
+  geom_histogram(aes(x=queen.nb.card)) +
+  xlab("Number of Neighbors")
+
+summary(queen.nb)
+plot(queen.nb,coords, lwd=.2, col="blue", cex = .5)
+```
+
+
+# Moran's I
+## Moran scatter plot
+```{r}
+
+moran <- moran(a$price, queen.weights, length(queen.nb), Szero(queen.weights))
+moran$I
+```
+
+
+## Moran's I
+```{r}
+EduMoran <- a %>%
+  dplyr::select(price)%>%
+  pull()%>%
+  moran.test(., queen.weights)
+EduMoran
+```
+
+
+## Geary's C
+```{r}
+EduGeary <- a %>%
+  dplyr::select(price)%>%
+  pull()%>%
+  geary.test(., queen.weights)
+```
+
+```{r}
+EduGeary
+```
+
+## local Moran's I
+```{r}
+Edulocalmoran <- a %>%
+  dplyr::select(price)%>%
+  pull()%>%
+  localmoran(., queen.weights)%>%
+  as_tibble()
+```
+
+
+```{r}
+Edulocalmoran
+```
+
+
+## Multiple Linear regression
+```{r}
+
+Regressiondata<- a%>%
+  clean_names()%>%
+  dplyr::select(price, 
+                lon,
+                lat,
+                floor_area,
+                number_floors,
+                room_number,
+                number_bathroom,
+                school_district,
+                rate,
+                distance_metro,
+                distance_hospital,
+                distance_sea)
+```
+
+
+## model1
+```{r}
+model1 <- Regressiondata %>%
+  lm(price^0.75~
+       lon+
+       lat+
+       floor_area+
+       number_floors+
+       room_number +
+       number_bathroom+
+       school_district+
+       rate+
+       distance_metro+
+       distance_hospital+
+       distance_sea,
+     data=.)
+
+```
+
+
+```{r}
+summary(model1)
+```
+
+# Regression model 2
+```{r}
+model2 <- Regressiondata %>%
+  lm(price^0.75~
+       lon+
+       lat+
+       floor_area+
+       number_floors+
+       number_bathroom+
+       school_district+
+       rate+
+       distance_hospital,
+     data=.)
+summary(model2)
+```
+
+## Regression model 2 AIC
+```{r}
+AIC(model2)
+```
+
+
+## VIF test
+```{r}
+# vif test
+vif(model2)
+```
+
+
+## print some model diagnositcs.
+```{r}
+par(mfrow=c(2,2))
+plot(model2)
+```
+
+
+## Durbin-Watson test
+```{r}
+DW <- durbinWatsonTest(model2)
+tidy(DW)
+```
+
+## write residuals out
+```{r}
+model_data1 <- model2 %>%
+  augment(., Regressiondata)
+```
+
+
+
+
+# Add them to the shapelayer
+```{r}
+Houseprice <- clev.points %>%
+  mutate(model1resids = residuals(model2))
+```
+
+
+
+# Spatial autocorrelation
+# Lagrange Multiplier Diagnostics
+```{r}
+lm.LMtests(model2,queen.weights, zero.policy=NULL, test="all", spChk=NULL, naSubset=TRUE)
+```
+
+
+## residual moran's I
+```{r}
+Nearest_neighbour <- Houseprice %>%
+  st_drop_geometry()%>%
+  dplyr::select(model1resids)%>%
+  pull()%>%
+  moran.test(., queen.weights)%>%
+  tidy()
+
+Nearest_neighbour
+```
+
+
+
+
+## spatially lagged model
+```{r}
+SLM <- lagsarlm(price^0.75~
+                                  lon+
+                                  lat+
+                                  floor_area+
+                                  number_floors+
+                                  number_bathroom+
+                                  school_district+
+                                  rate+
+                                  distance_hospital,
+                                data=Houseprice, 
+                                nb2listw(queen.nb, 
+                                         style="C"), 
+                                method = "eigen")
+
+summary(SLM)
+```
+
+
+### write out the residuals
+```{r}
+Houseprice <- Houseprice %>%
+  mutate(slag_dv_model2_resids = residuals(SLM))
+
+KNN4Moran <- Houseprice %>%
+  st_drop_geometry()%>%
+  dplyr::select(slag_dv_model2_resids)%>%
+  pull()%>%
+  moran.test(., queen.weights)%>%
+  tidy()
+KNN4Moran
+```
+
+
+
+## spatial error model
+```{r}
+sem_model1 <- errorsarlm(price^0.75~
+                           lon+
+                           lat+
+                           floor_area+
+                           number_floors+
+                           number_bathroom+
+                           school_district+
+                           rate+
+                           distance_hospital,
+                         data=Houseprice,
+                         nb2listw(queen.nb, style="C"), 
+                         method = "eigen")
+
+tidy(sem_model1)
+summary(sem_model1)
+```
+
+
+```{r}
+Houseprice <- Houseprice %>%
+  mutate(sem_model1 = residuals(sem_model1))
+
+KNN4Moranerr <- Houseprice %>%
+  st_drop_geometry()%>%
+  dplyr::select(sem_model1)%>%
+  pull()%>%
+  moran.test(., queen.weights)%>%
+  tidy()
+KNN4Moranerr
+```
+
+
+# GWR
+```{r}
+st_crs(Houseprice) = 27700
+
+TrafficaccidentnumberSP <- Houseprice %>%
+  as(., "Spatial")
+```
+
+## calculate kernel bandwidth
+```{r}
+GWRbandwidth <- gwr.sel(price^0.75~
+                          lon+
+                          lat+
+                          floor_area+
+                          number_floors+
+                          number_bathroom+
+                          school_district+
+                          rate+
+                          distance_hospital,
+                        data = Houseprice, 
+                        coords=cbind(a$lon,a$lat),
+                        adapt=T)
+GWRbandwidth
+```
+
+## run the gwr model
+```{r}
+gwr.model = gwr(price^0.75~
+                  lon+
+                  lat+
+                  floor_area+
+                  number_floors+
+                  number_bathroom+
+                  school_district+
+                  rate+
+                  distance_hospital,
+                data = Houseprice, 
+                coords=cbind(a$lon,a$lat), 
+                adapt=GWRbandwidth, 
+                hatmatrix=TRUE, 
+                se.fit=TRUE)
+gwr.model
+```
+
+
+
+
